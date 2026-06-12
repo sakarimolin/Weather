@@ -1,0 +1,38 @@
+# Prerequisites
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+/Installer/*.wixobj
+/Installer/*.wixpdb
+
+*.suo
+*.log
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dll
+
+# Compiled Static libraries
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+bin/
+obj/
+packages/
+.vs/
+
+*.bak
+*.msi
+
