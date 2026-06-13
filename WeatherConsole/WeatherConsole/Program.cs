@@ -283,6 +283,9 @@ static void PrintObservation(StationObservation observation, double requestLat, 
 
     if (observation.TemperatureC.HasValue && observation.RelativeHumidity.HasValue)
     {
+        var dewPoint = ComputeDewPoint(observation.TemperatureC.Value, observation.RelativeHumidity.Value);
+        Console.WriteLine($"Dew point: {dewPoint:F1} °C");
+
         var wetBulb = ComputeWetBulb(observation.TemperatureC.Value, observation.RelativeHumidity.Value);
         Console.WriteLine($"Wet temperature: {wetBulb:F1} °C");
     }
@@ -329,6 +332,15 @@ static double? RequestElevation(string prompt)
 
         Console.WriteLine("Invalid elevation. Enter a numeric value in meters or press Enter to skip.");
     }
+}
+
+static double ComputeDewPoint(double temperatureC, double relativeHumidity)
+{
+    var a = 17.27;
+    var b = 237.7;
+    var rh = Math.Clamp(relativeHumidity, 0.0, 100.0) / 100.0;
+    var alpha = (a * temperatureC) / (b + temperatureC) + Math.Log(rh);
+    return (b * alpha) / (a - alpha);
 }
 
 static double ComputeWetBulb(double temperatureC, double relativeHumidity)
