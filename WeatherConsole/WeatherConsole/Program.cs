@@ -4,7 +4,7 @@ using System.Xml.Linq;
 
 Console.WriteLine("WeatherConsole — FMI closest public weather station lookup");
 
-var (latitude, longitude) = GetLocation(args);
+var (latitude, longitude, fallbackElevation) = GetLocation(args);
 Console.WriteLine($"Searching closest weather station near {latitude.ToString(CultureInfo.InvariantCulture)}, {longitude.ToString(CultureInfo.InvariantCulture)}...");
 
 using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
@@ -16,13 +16,19 @@ if (stationObservation is null)
     return;
 }
 
-PrintObservation(stationObservation, latitude, longitude);
+PrintObservation(stationObservation, latitude, longitude, fallbackElevation);
 
-static (double Latitude, double Longitude) GetLocation(string[] args)
+static (double Latitude, double Longitude, double? ElevationMeters) GetLocation(string[] args)
 {
     if (args.Length >= 2 && TryParseCoordinate(args[0], out var lat) && TryParseCoordinate(args[1], out var lon))
     {
-        return (lat, lon);
+        double? elevation = null;
+        if (args.Length >= 3 && TryParseCoordinate(args[2], out var elevationValue))
+        {
+            elevation = elevationValue;
+        }
+
+        return (lat, lon, elevation);
     }
 
     while (true)
@@ -34,7 +40,8 @@ static (double Latitude, double Longitude) GetLocation(string[] args)
 
         if (TryParseCoordinate(latText, out var latValue) && TryParseCoordinate(lonText, out var lonValue))
         {
-            return (latValue, lonValue);
+            var elevation = RequestElevation("Enter elevation in meters (optional, press Enter to skip): ");
+            return (latValue, lonValue, elevation);
         }
 
         Console.WriteLine("Invalid coordinates. Please enter numeric latitude and longitude.");
@@ -145,6 +152,12 @@ static async Task<Dictionary<string, StationObservation>> ParseStationObservatio
             continue;
         }
 
+        double? elevation = null;
+        if (coords.Length >= 3 && double.TryParse(coords[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var alt))
+        {
+            elevation = alt;
+        }
+
         var measurementPoints = feature.Descendants(wml2 + "MeasurementTVP").ToList();
         if (measurementPoints.Count == 0)
         {
@@ -166,6 +179,7 @@ static async Task<Dictionary<string, StationObservation>> ParseStationObservatio
                 StationName = stationName,
                 Latitude = lat,
                 Longitude = lon,
+                ElevationMeters = elevation,
             };
             observations[stationId] = stationObservation;
         }
@@ -231,12 +245,21 @@ static string GetQueryParameter(string? url, string name)
     return string.Empty;
 }
 
-static void PrintObservation(StationObservation observation, double requestLat, double requestLon)
+static void PrintObservation(StationObservation observation, double requestLat, double requestLon, double? fallbackElevationMeters)
 {
     var distance = HaversineDistance(requestLat, requestLon, observation.Latitude, observation.Longitude);
     Console.WriteLine();
     Console.WriteLine($"Station: {observation.StationName} (fmisid: {observation.StationId})");
     Console.WriteLine($"Location: {observation.Latitude.ToString(CultureInfo.InvariantCulture)}, {observation.Longitude.ToString(CultureInfo.InvariantCulture)}");
+    var effectiveElevation = observation.ElevationMeters ?? fallbackElevationMeters;
+    if (observation.ElevationMeters.HasValue)
+    {
+        Console.WriteLine($"Elevation: {observation.ElevationMeters.Value:F0} m");
+    }
+    else if (fallbackElevationMeters.HasValue)
+    {
+        Console.WriteLine($"Elevation (user supplied): {fallbackElevationMeters.Value:F0} m");
+    }
     Console.WriteLine($"Distance: {distance:F2} km");
     Console.WriteLine();
 
@@ -276,6 +299,36 @@ static void PrintObservation(StationObservation observation, double requestLat, 
     {
         Console.WriteLine("Air pressure: unavailable");
     }
+
+    if (observation.TemperatureC.HasValue && observation.PressureHpa.HasValue && effectiveElevation.HasValue)
+    {
+        var densityAltitude = ComputeDensityAltitude(observation.TemperatureC.Value, observation.PressureHpa.Value, effectiveElevation.Value);
+        Console.WriteLine($"Density altitude: {densityAltitude:F0} m ({densityAltitude * 3.28084:F0} ft)");
+    }
+    else
+    {
+        Console.WriteLine("Density altitude: unavailable");
+    }
+}
+
+static double? RequestElevation(string prompt)
+{
+    while (true)
+    {
+        Console.Write(prompt);
+        var text = Console.ReadLine();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        if (TryParseCoordinate(text, out var elevation))
+        {
+            return elevation;
+        }
+
+        Console.WriteLine("Invalid elevation. Enter a numeric value in meters or press Enter to skip.");
+    }
 }
 
 static double ComputeWetBulb(double temperatureC, double relativeHumidity)
@@ -290,12 +343,37 @@ static double ComputeWetBulb(double temperatureC, double relativeHumidity)
     return result;
 }
 
+static double ComputeDensityAltitude(double temperatureC, double qnhHpa, double elevationMeters)
+{
+    var stationPressure = ComputeStationPressure(qnhHpa, elevationMeters);
+    var pressureAltitude = ComputePressureAltitudeMeters(stationPressure);
+    var isaTemperature = 15.0 - 0.0065 * pressureAltitude;
+    return pressureAltitude + 65.235 * (temperatureC - isaTemperature);
+}
+
+static double ComputeStationPressure(double qnhHpa, double elevationMeters)
+{
+    if (elevationMeters <= 0)
+    {
+        return qnhHpa;
+    }
+
+    var ratio = 1.0 - 0.0065 * elevationMeters / 288.15;
+    return qnhHpa * Math.Pow(ratio, 5.255877);
+}
+
+static double ComputePressureAltitudeMeters(double pressureHpa)
+{
+    return 44330.77 * (1.0 - Math.Pow(pressureHpa / 1013.25, 0.190284));
+}
+
 class StationObservation
 {
     public string StationId { get; set; } = string.Empty;
     public string StationName { get; set; } = string.Empty;
     public double Latitude { get; set; }
     public double Longitude { get; set; }
+    public double? ElevationMeters { get; set; }
     public double? TemperatureC { get; set; }
     public double? RelativeHumidity { get; set; }
     public double? PressureHpa { get; set; }
