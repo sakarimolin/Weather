@@ -1,8 +1,28 @@
 ﻿using System.Globalization;
+using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Xml.Linq;
 
-Console.WriteLine("WeatherConsole — FMI closest public weather station lookup");
+static class Program
+{
+    record SiteLocation(string Name, string Country, double Latitude, double Longitude, double? ElevationMeters);
+
+    class StationObservation
+    {
+        public string StationId { get; set; } = string.Empty;
+        public string StationName { get; set; } = string.Empty;
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+        public double? ElevationMeters { get; set; }
+        public double? TemperatureC { get; set; }
+        public double? RelativeHumidity { get; set; }
+        public double? PressureHpa { get; set; }
+    }
+
+    static async Task Main(string[] args)
+    {
+        Console.WriteLine("WeatherConsole — FMI closest public weather station lookup");
 
 var (latitude, longitude, fallbackElevation) = GetLocation(args);
 Console.WriteLine($"Searching closest weather station near {latitude.ToString(CultureInfo.InvariantCulture)}, {longitude.ToString(CultureInfo.InvariantCulture)}...");
@@ -81,22 +101,47 @@ else
 {
     Console.WriteLine("Avg density altitude: unavailable");
 }
+    }
 
-static (double Latitude, double Longitude, double? ElevationMeters) GetLocation(string[] args)
+    static (double Latitude, double Longitude, double? ElevationMeters) GetLocation(string[] args)
 {
-    if (args.Length >= 2 && TryParseCoordinate(args[0], out var lat) && TryParseCoordinate(args[1], out var lon))
+    if (args.Length > 0)
     {
-        double? elevation = null;
-        if (args.Length >= 3 && TryParseCoordinate(args[2], out var elevationValue))
+        var possibleSiteName = string.Join(' ', args).Trim();
+        if (!string.IsNullOrWhiteSpace(possibleSiteName)
+            && TryGetSiteLocationFromCsv(possibleSiteName, out var siteLocation))
         {
-            elevation = elevationValue;
+            Console.WriteLine($"Using site: {siteLocation.Name}, {siteLocation.Country}");
+            return (siteLocation.Latitude, siteLocation.Longitude, siteLocation.ElevationMeters);
         }
 
-        return (lat, lon, elevation);
+        if (args.Length >= 2 && TryParseCoordinate(args[0], out var lat) && TryParseCoordinate(args[1], out var lon))
+        {
+            double? elevation = null;
+            if (args.Length >= 3 && TryParseCoordinate(args[2], out var elevationValue))
+            {
+                elevation = elevationValue;
+            }
+
+            return (lat, lon, elevation);
+        }
     }
 
     while (true)
     {
+        Console.Write("Enter site name, or press Enter to enter latitude/longitude: ");
+        var siteName = Console.ReadLine();
+        if (!string.IsNullOrWhiteSpace(siteName))
+        {
+            if (TryGetSiteLocationFromCsv(siteName.Trim(), out var siteLocation))
+            {
+                Console.WriteLine($"Using site: {siteLocation.Name}, {siteLocation.Country}");
+                return (siteLocation.Latitude, siteLocation.Longitude, siteLocation.ElevationMeters);
+            }
+
+            Console.WriteLine("Site not found in Locations.csv. Please enter coordinates instead.");
+        }
+
         Console.Write("Enter latitude (for example 60.17): ");
         var latText = Console.ReadLine();
         Console.Write("Enter longitude (for example 24.94): ");
@@ -110,6 +155,66 @@ static (double Latitude, double Longitude, double? ElevationMeters) GetLocation(
 
         Console.WriteLine("Invalid coordinates. Please enter numeric latitude and longitude.");
     }
+}
+
+static bool TryGetSiteLocationFromCsv(string siteName, out SiteLocation siteLocation)
+{
+    var csvPath = GetLocationsCsvPath();
+    if (!File.Exists(csvPath))
+    {
+        siteLocation = default!;
+        return false;
+    }
+
+    var lines = File.ReadAllLines(csvPath);
+    for (var i = 1; i < lines.Length; i++)
+    {
+        var line = lines[i].Trim();
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            continue;
+        }
+
+        var columns = line.Split(',');
+        if (columns.Length < 5)
+        {
+            continue;
+        }
+
+        var name = columns[0].Trim();
+        var country = columns[1].Trim();
+        if (!TryParseCoordinate(columns[2], out var lat)
+            || !TryParseCoordinate(columns[3], out var lon))
+        {
+            continue;
+        }
+
+        double? elevation = null;
+        if (TryParseCoordinate(columns[4], out var elevValue))
+        {
+            elevation = elevValue;
+        }
+
+        if (string.Equals(name, siteName, StringComparison.OrdinalIgnoreCase))
+        {
+            siteLocation = new SiteLocation(name, country, lat, lon, elevation);
+            return true;
+        }
+    }
+
+    siteLocation = default!;
+    return false;
+}
+
+static string GetLocationsCsvPath()
+{
+    var candidatePaths = new[]
+    {
+        Path.Combine(Environment.CurrentDirectory, "Locations.csv"),
+        Path.Combine(AppContext.BaseDirectory, "Locations.csv")
+    };
+
+    return candidatePaths.FirstOrDefault(File.Exists) ?? candidatePaths[0];
 }
 
 static bool TryParseCoordinate(string? text, out double value)
@@ -444,15 +549,4 @@ static double ComputePressureAltitudeMeters(double pressureHpa)
 {
     return 44330.77 * (1.0 - Math.Pow(pressureHpa / 1013.25, 0.190284));
 }
-
-class StationObservation
-{
-    public string StationId { get; set; } = string.Empty;
-    public string StationName { get; set; } = string.Empty;
-    public double Latitude { get; set; }
-    public double Longitude { get; set; }
-    public double? ElevationMeters { get; set; }
-    public double? TemperatureC { get; set; }
-    public double? RelativeHumidity { get; set; }
-    public double? PressureHpa { get; set; }
 }
