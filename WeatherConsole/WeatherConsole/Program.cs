@@ -8,15 +8,79 @@ var (latitude, longitude, fallbackElevation) = GetLocation(args);
 Console.WriteLine($"Searching closest weather station near {latitude.ToString(CultureInfo.InvariantCulture)}, {longitude.ToString(CultureInfo.InvariantCulture)}...");
 
 using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-var stationObservation = await FindNearestStationAsync(httpClient, latitude, longitude);
+var stations = await FindNearestStationsAsync(httpClient, latitude, longitude, 2);
 
-if (stationObservation is null)
+if (stations.Count == 0)
 {
     Console.WriteLine("No weather station observations were found near the requested location.");
     return;
 }
 
-PrintObservation(stationObservation, latitude, longitude, fallbackElevation);
+for (var i = 0; i < stations.Count; i++)
+{
+    Console.WriteLine();
+    Console.WriteLine($"--- Station {i + 1} ---");
+    PrintObservation(stations[i], latitude, longitude, fallbackElevation);
+}
+
+// Compute and print averages across the found stations
+var temps = stations.Where(s => s.TemperatureC.HasValue).Select(s => s.TemperatureC!.Value).ToList();
+var hums = stations.Where(s => s.RelativeHumidity.HasValue).Select(s => s.RelativeHumidity!.Value).ToList();
+var press = stations.Where(s => s.PressureHpa.HasValue).Select(s => s.PressureHpa!.Value).ToList();
+
+Console.WriteLine();
+Console.WriteLine("--- Average of found stations ---");
+if (temps.Count > 0)
+{
+    var avgTempC = temps.Average();
+    var avgTempF = CelsiusToFahrenheit(avgTempC);
+    Console.WriteLine($"Avg temperature: {avgTempC:F1} °C / {avgTempF:F1} °F");
+}
+else
+{
+    Console.WriteLine("Avg temperature: unavailable");
+}
+
+if (hums.Count > 0)
+{
+    Console.WriteLine($"Avg humidity: {hums.Average():F1} %");
+}
+else
+{
+    Console.WriteLine("Avg humidity: unavailable");
+}
+
+if (press.Count > 0)
+{
+    var avgPressure = press.Average();
+    var avgPressureInHg = HpaToInHg(avgPressure);
+    Console.WriteLine($"Avg pressure: {avgPressure:F1} hPa / {avgPressureInHg:F2} inHg");
+}
+else
+{
+    Console.WriteLine("Avg pressure: unavailable");
+}
+
+// Average density altitude if computable per station
+var densityList = new List<double>();
+foreach (var s in stations)
+{
+    var effectiveElevation = s.ElevationMeters ?? fallbackElevation;
+    if (s.TemperatureC.HasValue && s.PressureHpa.HasValue && effectiveElevation.HasValue)
+    {
+        densityList.Add(ComputeDensityAltitude(s.TemperatureC.Value, s.PressureHpa.Value, effectiveElevation.Value));
+    }
+}
+
+if (densityList.Count > 0)
+{
+    var avgDensity = densityList.Average();
+    Console.WriteLine($"Avg density altitude: {avgDensity:F0} m ({avgDensity * 3.28084:F0} ft)");
+}
+else
+{
+    Console.WriteLine("Avg density altitude: unavailable");
+}
 
 static (double Latitude, double Longitude, double? ElevationMeters) GetLocation(string[] args)
 {
@@ -59,7 +123,7 @@ static bool TryParseCoordinate(string? text, out double value)
     return false;
 }
 
-static async Task<StationObservation?> FindNearestStationAsync(HttpClient httpClient, double latitude, double longitude)
+static async Task<List<StationObservation>> FindNearestStationsAsync(HttpClient httpClient, double latitude, double longitude, int count)
 {
     var nowUtc = DateTime.UtcNow;
     var startTime = nowUtc.AddHours(-12);
@@ -82,7 +146,10 @@ static async Task<StationObservation?> FindNearestStationAsync(HttpClient httpCl
 
             if (observations.Count > 0)
             {
-                return SelectNearestStation(observations, latitude, longitude);
+                return observations.Values
+                    .OrderBy(obs => HaversineDistance(latitude, longitude, obs.Latitude, obs.Longitude))
+                    .Take(count)
+                    .ToList();
             }
         }
         catch (Exception ex)
@@ -91,7 +158,7 @@ static async Task<StationObservation?> FindNearestStationAsync(HttpClient httpCl
         }
     }
 
-    return null;
+    return new List<StationObservation>();
 }
 
 static string BuildBbox(double lon, double lat, double radius)
@@ -201,15 +268,6 @@ static async Task<Dictionary<string, StationObservation>> ParseStationObservatio
     return observations;
 }
 
-static StationObservation? SelectNearestStation(Dictionary<string, StationObservation> observations, double latitude, double longitude)
-{
-    var ordered = observations.Values
-        .OrderBy(obs => HaversineDistance(latitude, longitude, obs.Latitude, obs.Longitude))
-        .ToList();
-
-    return ordered.FirstOrDefault();
-}
-
 static double HaversineDistance(double lat1, double lon1, double lat2, double lon2)
 {
     const double earthRadiusKm = 6371.0;
@@ -265,7 +323,8 @@ static void PrintObservation(StationObservation observation, double requestLat, 
 
     if (observation.TemperatureC.HasValue)
     {
-        Console.WriteLine($"Temperature: {observation.TemperatureC.Value:F1} °C");
+        var tempF = CelsiusToFahrenheit(observation.TemperatureC.Value);
+        Console.WriteLine($"Temperature: {observation.TemperatureC.Value:F1} °C / {tempF:F1} °F");
     }
     else
     {
@@ -284,10 +343,12 @@ static void PrintObservation(StationObservation observation, double requestLat, 
     if (observation.TemperatureC.HasValue && observation.RelativeHumidity.HasValue)
     {
         var dewPoint = ComputeDewPoint(observation.TemperatureC.Value, observation.RelativeHumidity.Value);
-        Console.WriteLine($"Dew point: {dewPoint:F1} °C");
+        var dewPointF = CelsiusToFahrenheit(dewPoint);
+        Console.WriteLine($"Dew point: {dewPoint:F1} °C / {dewPointF:F1} °F");
 
         var wetBulb = ComputeWetBulb(observation.TemperatureC.Value, observation.RelativeHumidity.Value);
-        Console.WriteLine($"Wet temperature: {wetBulb:F1} °C");
+        var wetBulbF = CelsiusToFahrenheit(wetBulb);
+        Console.WriteLine($"Wet temperature: {wetBulb:F1} °C / {wetBulbF:F1} °F");
     }
     else
     {
@@ -296,7 +357,8 @@ static void PrintObservation(StationObservation observation, double requestLat, 
 
     if (observation.PressureHpa.HasValue)
     {
-        Console.WriteLine($"Air pressure: {observation.PressureHpa.Value:F1} hPa");
+        var pressureInHg = HpaToInHg(observation.PressureHpa.Value);
+        Console.WriteLine($"Air pressure: {observation.PressureHpa.Value:F1} hPa / {pressureInHg:F2} inHg");
     }
     else
     {
@@ -362,6 +424,10 @@ static double ComputeDensityAltitude(double temperatureC, double qnhHpa, double 
     var isaTemperature = 15.0 - 0.0065 * pressureAltitude;
     return pressureAltitude + 65.235 * (temperatureC - isaTemperature);
 }
+
+static double CelsiusToFahrenheit(double celsius) => celsius * 9.0 / 5.0 + 32.0;
+
+static double HpaToInHg(double hpa) => hpa * 0.029529983071445;
 
 static double ComputeStationPressure(double qnhHpa, double elevationMeters)
 {
