@@ -2,6 +2,8 @@
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Text.Json;
+using System.Threading.Channels;
 using System.Xml.Linq;
 
 static class Program
@@ -22,142 +24,162 @@ static class Program
 
     static async Task Main(string[] args)
     {
-        Console.WriteLine("WeatherConsole — FMI closest public weather station lookup");
-
-var (latitude, longitude, fallbackElevation) = GetLocation(args);
-Console.WriteLine($"Searching closest weather station near {latitude.ToString(CultureInfo.InvariantCulture)}, {longitude.ToString(CultureInfo.InvariantCulture)}...");
-
-using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-var stations = await FindNearestStationsAsync(httpClient, latitude, longitude, 2);
-
-if (stations.Count == 0)
-{
-    Console.WriteLine("No weather station observations were found near the requested location.");
-    return;
-}
-
-for (var i = 0; i < stations.Count; i++)
-{
-    Console.WriteLine();
-    Console.WriteLine($"--- Station {i + 1} ---");
-    PrintObservation(stations[i], latitude, longitude, fallbackElevation);
-}
-
-// Compute and print averages across the found stations
-var temps = stations.Where(s => s.TemperatureC.HasValue).Select(s => s.TemperatureC!.Value).ToList();
-var hums = stations.Where(s => s.RelativeHumidity.HasValue).Select(s => s.RelativeHumidity!.Value).ToList();
-var press = stations.Where(s => s.PressureHpa.HasValue).Select(s => s.PressureHpa!.Value).ToList();
-
-Console.WriteLine();
-Console.WriteLine("--- Average of found stations ---");
-if (temps.Count > 0)
-{
-    var avgTempC = temps.Average();
-    var avgTempF = CelsiusToFahrenheit(avgTempC);
-    Console.WriteLine($"Avg temperature: {avgTempC:F1} °C / {avgTempF:F1} °F");
-}
-else
-{
-    Console.WriteLine("Avg temperature: unavailable");
-}
-
-if (hums.Count > 0)
-{
-    Console.WriteLine($"Avg humidity: {hums.Average():F1} %");
-}
-else
-{
-    Console.WriteLine("Avg humidity: unavailable");
-}
-
-if (press.Count > 0)
-{
-    var avgPressure = press.Average();
-    var avgPressureInHg = HpaToInHg(avgPressure);
-    Console.WriteLine($"Avg pressure: {avgPressure:F1} hPa / {avgPressureInHg:F2} inHg");
-}
-else
-{
-    Console.WriteLine("Avg pressure: unavailable");
-}
-
-// Average density altitude if computable per station
-var densityList = new List<double>();
-foreach (var s in stations)
-{
-    var effectiveElevation = s.ElevationMeters ?? fallbackElevation;
-    if (s.TemperatureC.HasValue && s.PressureHpa.HasValue && effectiveElevation.HasValue)
-    {
-        densityList.Add(ComputeDensityAltitude(s.TemperatureC.Value, s.PressureHpa.Value, effectiveElevation.Value));
-    }
-}
-
-if (densityList.Count > 0)
-{
-    var avgDensity = densityList.Average();
-    Console.WriteLine($"Avg density altitude: {avgDensity:F0} m ({avgDensity * 3.28084:F0} ft)");
-}
-else
-{
-    Console.WriteLine("Avg density altitude: unavailable");
-}
-    }
-
-    static (double Latitude, double Longitude, double? ElevationMeters) GetLocation(string[] args)
-{
-    if (args.Length > 0)
-    {
-        var possibleSiteName = string.Join(' ', args).Trim();
-        if (!string.IsNullOrWhiteSpace(possibleSiteName)
-            && TryGetSiteLocationFromCsv(possibleSiteName, out var siteLocation))
+        if (args.Length >= 3)
         {
-            Console.WriteLine($"Using site: {siteLocation.Name}, {siteLocation.Country}");
-            return (siteLocation.Latitude, siteLocation.Longitude, siteLocation.ElevationMeters);
-        }
-
-        if (args.Length >= 2 && TryParseCoordinate(args[0], out var lat) && TryParseCoordinate(args[1], out var lon))
-        {
-            double? elevation = null;
-            if (args.Length >= 3 && TryParseCoordinate(args[2], out var elevationValue))
+            Console.WriteLine($"Calculating Density Altitude for site: {args[0]}, at temperature {args[1]} pressure {args[2]}");
+            if (TryParseCoordinate(args[1], out double temperature)
+                && TryParseCoordinate(args[2], out double pressure))
             {
-                elevation = elevationValue;
+                TryGetSiteLocationFromCsv(args[0], out var siteLocation);
+                var elevation = siteLocation.ElevationMeters ?? 0;
+                Console.WriteLine($"Temperature: {temperature} °C, Pressure: {pressure} hPa, Elevation: {elevation} m");
+                var densityAltitude = ComputeDensityAltitude(temperature, pressure, elevation);
+                Console.WriteLine($"Density altitude: {densityAltitude:F0} m ({densityAltitude * 3.28084:F0} ft)");
+            }
+            else
+            {
+                Console.WriteLine("Invalid temperature or pressure argument. Please provide numeric values.");
+            }
+        }
+        else
+        {
+            Console.WriteLine("WeatherConsole — closest public weather station lookup");
+
+            var (latitude, longitude, fallbackElevation, country) = GetLocation(args);
+            Console.WriteLine($"Searching closest weather station near {latitude.ToString(CultureInfo.InvariantCulture)}, {longitude.ToString(CultureInfo.InvariantCulture)}...");
+
+            using var httpClient = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+            var stations = await FindNearestStationsAsync(httpClient, latitude, longitude, 3, country);
+
+            if (stations.Count == 0)
+            {
+                Console.WriteLine("No weather station observations were found near the requested location.");
+                return;
             }
 
-            return (lat, lon, elevation);
+            for (var i = 0; i < stations.Count; i++)
+            {
+                Console.WriteLine();
+                Console.WriteLine($"--- Station {i + 1} ---");
+                PrintObservation(stations[i], latitude, longitude, fallbackElevation);
+            }
+
+            // Compute and print averages across the found stations
+            var temps = stations.Where(s => s.TemperatureC.HasValue).Select(s => s.TemperatureC!.Value).ToList();
+            var hums = stations.Where(s => s.RelativeHumidity.HasValue).Select(s => s.RelativeHumidity!.Value).ToList();
+            var press = stations.Where(s => s.PressureHpa.HasValue).Select(s => s.PressureHpa!.Value).ToList();
+
+            Console.WriteLine();
+            Console.WriteLine("--- Average of found stations ---");
+            if (temps.Count > 0)
+            {
+                var avgTempC = temps.Average();
+                var avgTempF = CelsiusToFahrenheit(avgTempC);
+                Console.WriteLine($"Avg temperature: {avgTempC:F1} °C / {avgTempF:F1} °F");
+            }
+            else
+            {
+                Console.WriteLine("Avg temperature: unavailable");
+            }
+
+            if (hums.Count > 0)
+            {
+                Console.WriteLine($"Avg humidity: {hums.Average():F1} %");
+            }
+            else
+            {
+                Console.WriteLine("Avg humidity: unavailable");
+            }
+
+            if (press.Count > 0)
+            {
+                var avgPressure = press.Average();
+                var avgPressureInHg = HpaToInHg(avgPressure);
+                Console.WriteLine($"Avg pressure: {avgPressure:F1} hPa / {avgPressureInHg:F2} inHg");
+            }
+            else
+            {
+                Console.WriteLine("Avg pressure: unavailable");
+            }
+
+            // Average density altitude if computable per station
+            var densityList = new List<double>();
+            foreach (var s in stations)
+            {
+                var effectiveElevation = s.ElevationMeters ?? fallbackElevation;
+                if (s.TemperatureC.HasValue && s.PressureHpa.HasValue && effectiveElevation.HasValue)
+                {
+                    densityList.Add(ComputeDensityAltitude(s.TemperatureC.Value, s.PressureHpa.Value, effectiveElevation.Value));
+                }
+            }
+
+            if (densityList.Count > 0)
+            {
+                var avgDensity = densityList.Average();
+                Console.WriteLine($"Avg density altitude: {avgDensity:F0} m ({avgDensity * 3.28084:F0} ft)");
+            }
+            else
+            {
+                Console.WriteLine("Avg density altitude: unavailable");
+            }
         }
     }
 
-    while (true)
+    static (double Latitude, double Longitude, double? ElevationMeters, string? Country) GetLocation(string[] args)
     {
-        Console.Write("Enter site name, or press Enter to enter latitude/longitude: ");
-        var siteName = Console.ReadLine();
-        if (!string.IsNullOrWhiteSpace(siteName))
+        if (args.Length > 0)
         {
-            if (TryGetSiteLocationFromCsv(siteName.Trim(), out var siteLocation))
+            var possibleSiteName = string.Join(' ', args).Trim();
+            if (!string.IsNullOrWhiteSpace(possibleSiteName)
+                && TryGetSiteLocationFromCsv(possibleSiteName, out var siteLocation))
             {
                 Console.WriteLine($"Using site: {siteLocation.Name}, {siteLocation.Country}");
-                return (siteLocation.Latitude, siteLocation.Longitude, siteLocation.ElevationMeters);
+                return (siteLocation.Latitude, siteLocation.Longitude, siteLocation.ElevationMeters, siteLocation.Country);
             }
 
-            Console.WriteLine("Site not found in Locations.csv. Please enter coordinates instead.");
+            if (args.Length >= 2 && TryParseCoordinate(args[0], out var lat) && TryParseCoordinate(args[1], out var lon))
+            {
+                double? elevation = null;
+                if (args.Length >= 3 && TryParseCoordinate(args[2], out var elevationValue))
+                {
+                    elevation = elevationValue;
+                }
+
+                return (lat, lon, elevation, null);
+            }
         }
 
-        Console.Write("Enter latitude (for example 60.17): ");
-        var latText = Console.ReadLine();
-        Console.Write("Enter longitude (for example 24.94): ");
-        var lonText = Console.ReadLine();
-
-        if (TryParseCoordinate(latText, out var latValue) && TryParseCoordinate(lonText, out var lonValue))
+        while (true)
         {
-            var elevation = RequestElevation("Enter elevation in meters (optional, press Enter to skip): ");
-            return (latValue, lonValue, elevation);
+            Console.Write("Enter site name, or press Enter to enter latitude/longitude: ");
+            var siteName = Console.ReadLine();
+            if (!string.IsNullOrWhiteSpace(siteName))
+            {
+                if (TryGetSiteLocationFromCsv(siteName.Trim(), out var siteLocation))
+                {
+                    Console.WriteLine($"Using site: {siteLocation.Name}, {siteLocation.Country}");
+                    return (siteLocation.Latitude, siteLocation.Longitude, siteLocation.ElevationMeters, siteLocation.Country);
+                }
+
+                Console.WriteLine("Site not found in Locations.csv. Please enter coordinates instead.");
+            }
+
+            Console.Write("Enter latitude (for example 60.17): ");
+            var latText = Console.ReadLine();
+            Console.Write("Enter longitude (for example 24.94): ");
+            var lonText = Console.ReadLine();
+
+            if (TryParseCoordinate(latText, out var latValue) && TryParseCoordinate(lonText, out var lonValue))
+            {
+                var elevation = RequestElevation("Enter elevation in meters (optional, press Enter to skip): ");
+                return (latValue, lonValue, elevation, null);
+            }
+
+            Console.WriteLine("Invalid coordinates. Please enter numeric latitude and longitude.");
         }
-
-        Console.WriteLine("Invalid coordinates. Please enter numeric latitude and longitude.");
     }
-}
 
-static bool TryGetSiteLocationFromCsv(string siteName, out SiteLocation siteLocation)
+    static bool TryGetSiteLocationFromCsv(string siteName, out SiteLocation siteLocation)
 {
     var csvPath = GetLocationsCsvPath();
     if (!File.Exists(csvPath))
@@ -211,10 +233,16 @@ static string GetLocationsCsvPath()
     var candidatePaths = new[]
     {
         Path.Combine(Environment.CurrentDirectory, "Locations.csv"),
-        Path.Combine(AppContext.BaseDirectory, "Locations.csv")
+        Path.Combine(Environment.CurrentDirectory, "..", "Locations.csv"),
+        Path.Combine(Environment.CurrentDirectory, "..", "..", "Locations.csv"),
+        Path.Combine(AppContext.BaseDirectory, "Locations.csv"),
+        Path.Combine(AppContext.BaseDirectory, "..", "Locations.csv"),
+        Path.Combine(AppContext.BaseDirectory, "..", "..", "Locations.csv"),
+        Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "Locations.csv")
     };
 
-    return candidatePaths.FirstOrDefault(File.Exists) ?? candidatePaths[0];
+    return candidatePaths.Select(Path.GetFullPath).FirstOrDefault(File.Exists)
+           ?? Path.Combine(AppContext.BaseDirectory, "Locations.csv");
 }
 
 static bool TryParseCoordinate(string? text, out double value)
@@ -228,7 +256,40 @@ static bool TryParseCoordinate(string? text, out double value)
     return false;
 }
 
-static async Task<List<StationObservation>> FindNearestStationsAsync(HttpClient httpClient, double latitude, double longitude, int count)
+static async Task<List<StationObservation>> FindNearestStationsAsync(HttpClient httpClient, double latitude, double longitude, int count, string? country)
+{
+    const double maxSwedishStationDistanceKm = 50.0;
+
+    // Always try FMI first since it has current observations.
+    // FMI's WFS API works for any geographic location, including Sweden.
+    var fmiResult = await FindNearestStationsFmiAsync(httpClient, latitude, longitude, count);
+
+    if (!string.IsNullOrWhiteSpace(country)
+        && string.Equals(country.Trim(), "Sweden", StringComparison.OrdinalIgnoreCase))
+    {
+        if (fmiResult.Count > 0)
+        {
+            var nearestDistance = fmiResult.Min(obs => HaversineDistance(latitude, longitude, obs.Latitude, obs.Longitude));
+            if (nearestDistance <= maxSwedishStationDistanceKm)
+            {
+                return fmiResult;
+            }
+
+            Console.WriteLine($"FMI returned {fmiResult.Count} station(s), but nearest is {nearestDistance:F2} km away; using SMHI for Sweden-only locations.");
+        }
+
+        return await FindNearestStationsSmhiAsync(httpClient, latitude, longitude, count, maxSwedishStationDistanceKm);
+    }
+
+    if (fmiResult.Count > 0)
+    {
+        return fmiResult;
+    }
+
+    return new List<StationObservation>();
+}
+
+static async Task<List<StationObservation>> FindNearestStationsFmiAsync(HttpClient httpClient, double latitude, double longitude, int count)
 {
     var nowUtc = DateTime.UtcNow;
     var startTime = nowUtc.AddHours(-12);
@@ -236,11 +297,12 @@ static async Task<List<StationObservation>> FindNearestStationsAsync(HttpClient 
     var parameters = "t2m,rh,p_sea";
     var storedQueryId = "fmi::observations::weather::timevaluepair";
     var searchRadii = new[] { 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0 };
+    var baseUrl = "https://opendata.fmi.fi/wfs";
 
     foreach (var radius in searchRadii)
     {
         var bbox = BuildBbox(longitude, latitude, radius);
-        var requestUri = $"https://opendata.fmi.fi/wfs?request=GetFeature&storedquery_id={Uri.EscapeDataString(storedQueryId)}&bbox={bbox}&starttime={Uri.EscapeDataString(startTime.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture))}&endtime={Uri.EscapeDataString(endTime.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture))}&parameters={Uri.EscapeDataString(parameters)}";
+        var requestUri = $"{baseUrl}?request=GetFeature&storedquery_id={Uri.EscapeDataString(storedQueryId)}&bbox={bbox}&starttime={Uri.EscapeDataString(startTime.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture))}&endtime={Uri.EscapeDataString(endTime.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture))}&parameters={Uri.EscapeDataString(parameters)}";
 
         try
         {
@@ -260,10 +322,235 @@ static async Task<List<StationObservation>> FindNearestStationsAsync(HttpClient 
         catch (Exception ex)
         {
             Console.WriteLine($"Request failed for radius {radius}°: {ex.Message}");
+            if (ex.Message.Contains("404"))
+            {
+                Console.WriteLine($"  Attempted URL: {requestUri}");
+            }
         }
     }
 
     return new List<StationObservation>();
+}
+
+static async Task<List<StationObservation>> FindNearestStationsSmhiAsync(HttpClient httpClient, double latitude, double longitude, int count, double maxDistanceKm)
+{
+    try
+    {
+        var stationsUrl = "https://opendata-download-metobs.smhi.se/api/version/1.0/parameter/1.json";
+        var stationsJson = await httpClient.GetStringAsync(stationsUrl);
+        using var doc = JsonDocument.Parse(stationsJson);
+        var root = doc.RootElement;
+
+        var stations = new List<(string Id, string Name, double Lat, double Lon, double? Elevation)>();
+
+        if (root.TryGetProperty("station", out var stationArray) && stationArray.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var station in stationArray.EnumerateArray())
+            {
+                if (station.TryGetProperty("id", out var idElem)
+                    && station.TryGetProperty("name", out var nameElem)
+                    && station.TryGetProperty("latitude", out var latElem)
+                    && station.TryGetProperty("longitude", out var lonElem)
+                    && station.TryGetProperty("active", out var activeElem)
+                    && activeElem.ValueKind == JsonValueKind.True)
+                {
+                    var stationId = idElem.ValueKind switch
+                    {
+                        JsonValueKind.String => idElem.GetString(),
+                        JsonValueKind.Number => idElem.GetRawText(),
+                        _ => null
+                    };
+                    var stationName = nameElem.GetString() ?? string.Empty;
+                    var stationLat = latElem.GetDouble();
+                    var stationLon = lonElem.GetDouble();
+                    var stationElevation = station.TryGetProperty("height", out var heightElem) && heightElem.ValueKind == JsonValueKind.Number
+                        ? heightElem.GetDouble()
+                        : (double?)null;
+
+                    if (string.IsNullOrWhiteSpace(stationId))
+                    {
+                        continue;
+                    }
+
+                    stations.Add((stationId, stationName, stationLat, stationLon, stationElevation));
+                }
+            }
+        }
+
+        if (stations.Count == 0 && root.TryGetProperty("station", out stationArray) && stationArray.ValueKind == JsonValueKind.Array)
+        {
+            // Fall back to all stations if no active station metadata was found.
+            foreach (var station in stationArray.EnumerateArray())
+            {
+                if (station.TryGetProperty("id", out var idElem)
+                    && station.TryGetProperty("name", out var nameElem)
+                    && station.TryGetProperty("latitude", out var latElem)
+                    && station.TryGetProperty("longitude", out var lonElem))
+                {
+                    var stationId = idElem.ValueKind switch
+                    {
+                        JsonValueKind.String => idElem.GetString(),
+                        JsonValueKind.Number => idElem.GetRawText(),
+                        _ => null
+                    };
+                    var stationName = nameElem.GetString() ?? string.Empty;
+                    var stationLat = latElem.GetDouble();
+                    var stationLon = lonElem.GetDouble();
+                    var stationElevation = station.TryGetProperty("height", out var heightElem) && heightElem.ValueKind == JsonValueKind.Number
+                        ? heightElem.GetDouble()
+                        : (double?)null;
+
+                    if (string.IsNullOrWhiteSpace(stationId))
+                    {
+                        continue;
+                    }
+
+                    stations.Add((stationId, stationName, stationLat, stationLon, stationElevation));
+                }
+            }
+        }
+
+        var nearest = stations
+            .OrderBy(s => HaversineDistance(latitude, longitude, s.Lat, s.Lon))
+            .Take(count * 6)
+            .ToList();
+
+        var result = new List<StationObservation>();
+        foreach (var station in nearest)
+        {
+            var obs = await GetSmhiStationObservationAsync(httpClient, station.Id, station.Name, station.Lat, station.Lon, station.Elevation);
+            if (obs == null)
+            {
+                continue;
+            }
+
+            var distance = HaversineDistance(latitude, longitude, obs.Latitude, obs.Longitude);
+            if (distance > maxDistanceKm)
+            {
+                continue;
+            }
+
+            result.Add(obs);
+            if (result.Count >= count)
+            {
+                break;
+            }
+        }
+
+        if (result.Count == 0)
+        {
+            Console.WriteLine($"No SMHI station within {maxDistanceKm:F0} km returned current data.");
+        }
+
+        return result;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"SMHI API request failed: {ex.Message}");
+        return new List<StationObservation>();
+    }
+}
+
+static async Task<StationObservation?> GetSmhiStationObservationAsync(HttpClient httpClient, string stationId, string stationName, double latitude, double longitude, double? elevationMeters)
+{
+    try
+    {
+        var temperatureTask = GetSmhiLatestCsvValueAsync(httpClient, stationId, 1);
+        var humidityTask = GetSmhiLatestCsvValueAsync(httpClient, stationId, 6);
+        var pressureTask = GetSmhiLatestCsvValueAsync(httpClient, stationId, 9);
+
+        await Task.WhenAll(temperatureTask, humidityTask, pressureTask);
+
+        var temperatureC = temperatureTask.Result;
+        if (!temperatureC.HasValue)
+        {
+            return null;
+        }
+
+        return new StationObservation
+        {
+            StationId = stationId,
+            StationName = stationName,
+            Latitude = latitude,
+            Longitude = longitude,
+            ElevationMeters = elevationMeters,
+            TemperatureC = temperatureC,
+            RelativeHumidity = humidityTask.Result,
+            PressureHpa = pressureTask.Result,
+        };
+    }
+    catch
+    {
+        return null;
+    }
+}
+
+static async Task<double?> GetSmhiLatestCsvValueAsync(HttpClient httpClient, string stationId, int parameterId)
+{
+    try
+    {
+        var csvUrl = $"https://opendata-download-metobs.smhi.se/api/version/1.0/parameter/{parameterId}/station/{stationId}/period/latest-hour/data.csv";
+        using var response = await httpClient.GetAsync(csvUrl);
+        response.EnsureSuccessStatusCode();
+        var csvText = await response.Content.ReadAsStringAsync();
+        return ParseSmhiCsvLatestValue(csvText);
+    }
+    catch
+    {
+        return null;
+    }
+}
+
+static double? ParseSmhiCsvLatestValue(string csvText)
+{
+    if (string.IsNullOrWhiteSpace(csvText))
+    {
+        return null;
+    }
+
+    var lines = csvText.Replace("\r", string.Empty).Split('\n');
+    var headerFound = false;
+    double? lastValue = null;
+
+    foreach (var rawLine in lines)
+    {
+        var line = rawLine.Trim();
+        if (string.IsNullOrEmpty(line))
+        {
+            continue;
+        }
+
+        if (!headerFound)
+        {
+            if (line.StartsWith("Datum;Tid", StringComparison.OrdinalIgnoreCase))
+            {
+                headerFound = true;
+            }
+            continue;
+        }
+
+        if (line.StartsWith("Kvalitetskoderna:", StringComparison.OrdinalIgnoreCase)
+            || line.StartsWith("Observers", StringComparison.OrdinalIgnoreCase)
+            || line.StartsWith("Tidsperiod", StringComparison.OrdinalIgnoreCase)
+            || line.StartsWith("Samplingstid", StringComparison.OrdinalIgnoreCase))
+        {
+            continue;
+        }
+
+        var columns = line.Split(';');
+        if (columns.Length < 3)
+        {
+            continue;
+        }
+
+        var valueText = columns[2].Trim();
+        if (double.TryParse(valueText, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsedValue))
+        {
+            lastValue = parsedValue;
+        }
+    }
+
+    return lastValue;
 }
 
 static string BuildBbox(double lon, double lat, double radius)
@@ -412,7 +699,7 @@ static void PrintObservation(StationObservation observation, double requestLat, 
 {
     var distance = HaversineDistance(requestLat, requestLon, observation.Latitude, observation.Longitude);
     Console.WriteLine();
-    Console.WriteLine($"Station: {observation.StationName} (fmisid: {observation.StationId})");
+    Console.WriteLine($"Station: {observation.StationName} (ID: {observation.StationId})");
     Console.WriteLine($"Location: {observation.Latitude.ToString(CultureInfo.InvariantCulture)}, {observation.Longitude.ToString(CultureInfo.InvariantCulture)}");
     var effectiveElevation = observation.ElevationMeters ?? fallbackElevationMeters;
     if (observation.ElevationMeters.HasValue)
