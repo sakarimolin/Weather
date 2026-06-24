@@ -812,9 +812,10 @@ static double ComputeWetBulb(double temperatureC, double relativeHumidity)
 static double ComputeDensityAltitude(double temperatureC, double qnhHpa, double elevationMeters)
 {
     var stationPressure = ComputeStationPressure(qnhHpa, elevationMeters);
-    var pressureAltitude = ComputePressureAltitudeMeters(stationPressure);
-    var isaTemperature = 15.0 - 0.0065 * pressureAltitude;
-    return pressureAltitude + 65.235 * (temperatureC - isaTemperature);
+    var pressureAltitudeM = ComputePressureAltitudeMeters(stationPressure);
+    Console.WriteLine($"Pressure altitude: {pressureAltitudeM:F1} m ({pressureAltitudeM * 3.28084:F1} ft)");
+    var isaTemperature = 15.0 - 0.0065 * pressureAltitudeM;
+    return pressureAltitudeM + 65.235 * (temperatureC - isaTemperature);
 }
 
 static double CelsiusToFahrenheit(double celsius) => celsius * 9.0 / 5.0 + 32.0;
@@ -828,12 +829,14 @@ static double ComputeStationPressure(double qnhHpa, double elevationMeters)
         return qnhHpa;
     }
 
-    var ratio = 1.0 - 0.0065 * elevationMeters / 288.15;
+    var ratio = 1.0 - elevationMeters / 44330.77;
     return qnhHpa * Math.Pow(ratio, 5.255877);
+//    return qnhHpa * Math.Pow(ratio, 4.255877);
 }
 
 static double ComputePressureAltitudeMeters(double pressureHpa)
 {
     return 44330.77 * (1.0 - Math.Pow(pressureHpa / 1013.25, 0.190284));
+//    return 44330.77 * (1.0 - Math.Pow(pressureHpa / 1013.25, 0.23497));
 }
 }
