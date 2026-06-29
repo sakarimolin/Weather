@@ -34,7 +34,13 @@ static class Program
                 var elevation = siteLocation.ElevationMeters ?? 0;
                 Console.WriteLine($"Temperature: {temperature} °C, Pressure: {pressure} hPa, Elevation: {elevation} m");
                 var densityAltitude = ComputeDensityAltitude(temperature, pressure, elevation);
-                Console.WriteLine($"Density altitude: {densityAltitude:F0} m ({densityAltitude * 3.28084:F0} ft)");
+                Console.WriteLine($"Density altitude: {densityAltitude:F0} m / {densityAltitude * 3.28084:F0} ft");
+                if (TryParseCoordinate(args[3], out double humidityP))
+                {
+                    Console.WriteLine($"Temperature: {temperature} °C, Pressure: {pressure} hPa, Humidity: {humidityP} %, Elevation: {elevation} m");
+                    var densityAltitudeHumid = ComputeDensityAltitudeWithHumidity(temperature, humidityP, pressure, elevation);
+                    Console.WriteLine($"Density altitude with humidity: {densityAltitudeHumid:F0} m / {densityAltitudeHumid * 3.28084:F0} ft");   
+                }
             }
             else
             {
@@ -104,19 +110,29 @@ static class Program
 
             // Average density altitude if computable per station
             var densityList = new List<double>();
+            var densityListHums = new List<double>();
             foreach (var s in stations)
             {
                 var effectiveElevation = s.ElevationMeters ?? fallbackElevation;
                 if (s.TemperatureC.HasValue && s.PressureHpa.HasValue && effectiveElevation.HasValue)
                 {
                     densityList.Add(ComputeDensityAltitude(s.TemperatureC.Value, s.PressureHpa.Value, effectiveElevation.Value));
+                    if (s.RelativeHumidity.HasValue)
+                    {
+                        densityListHums.Add(ComputeDensityAltitudeWithHumidity(s.TemperatureC.Value, s.RelativeHumidity.Value, s.PressureHpa.Value, effectiveElevation.Value));
+                    }
                 }
             }
-
+    
             if (densityList.Count > 0)
             {
                 var avgDensity = densityList.Average();
-                Console.WriteLine($"Avg density altitude: {avgDensity:F0} m ({avgDensity * 3.28084:F0} ft)");
+                Console.WriteLine($"Avg density altitude: {avgDensity:F0} m / {avgDensity * 3.28084:F0} ft");
+                if (densityListHums.Count > 0)
+                {
+                    var avgDensityHums = densityListHums.Average();
+                    Console.WriteLine($"Avg density altitude with humidity: {avgDensityHums:F0} m / {avgDensityHums * 3.28084:F0} ft");
+                }
             }
             else
             {
@@ -760,7 +776,12 @@ static void PrintObservation(StationObservation observation, double requestLat, 
     if (observation.TemperatureC.HasValue && observation.PressureHpa.HasValue && effectiveElevation.HasValue)
     {
         var densityAltitude = ComputeDensityAltitude(observation.TemperatureC.Value, observation.PressureHpa.Value, effectiveElevation.Value);
-        Console.WriteLine($"Density altitude: {densityAltitude:F0} m ({densityAltitude * 3.28084:F0} ft)");
+        Console.WriteLine($"Density altitude: {densityAltitude:F0} m / {densityAltitude * 3.28084:F0} ft");
+        if(observation.RelativeHumidity.HasValue)
+        {
+            var densityAltitudeHumid = ComputeDensityAltitudeWithHumidity(observation.TemperatureC.Value, observation.RelativeHumidity.Value, observation.PressureHpa.Value, effectiveElevation.Value);
+            Console.WriteLine($"Density altitude with humidity: {densityAltitudeHumid:F0} m / {densityAltitudeHumid * 3.28084:F0} ft");
+        }
     }
     else
     {
@@ -778,12 +799,10 @@ static double? RequestElevation(string prompt)
         {
             return null;
         }
-
         if (TryParseCoordinate(text, out var elevation))
         {
             return elevation;
         }
-
         Console.WriteLine("Invalid elevation. Enter a numeric value in meters or press Enter to skip.");
     }
 }
@@ -813,30 +832,47 @@ static double ComputeDensityAltitude(double temperatureC, double qnhHpa, double 
 {
     var stationPressure = ComputeStationPressure(qnhHpa, elevationMeters);
     var pressureAltitudeM = ComputePressureAltitudeMeters(stationPressure);
-    Console.WriteLine($"Pressure altitude: {pressureAltitudeM:F1} m ({pressureAltitudeM * 3.28084:F1} ft)");
     var isaTemperature = 15.0 - 0.0065 * pressureAltitudeM;
-    return pressureAltitudeM + 65.235 * (temperatureC - isaTemperature);
+    return pressureAltitudeM + 120.4 * (temperatureC - isaTemperature) * 0.3048; // convert feet to meters
 }
 
 static double CelsiusToFahrenheit(double celsius) => celsius * 9.0 / 5.0 + 32.0;
 
 static double HpaToInHg(double hpa) => hpa * 0.029529983071445;
 
-static double ComputeStationPressure(double qnhHpa, double elevationMeters)
+static double ComputeStationPressure(double pressureHpa, double elevationMeters)
 {
     if (elevationMeters <= 0)
     {
-        return qnhHpa;
+        return pressureHpa;
     }
-
-    var ratio = 1.0 - elevationMeters / 44330.77;
-    return qnhHpa * Math.Pow(ratio, 5.255877);
-//    return qnhHpa * Math.Pow(ratio, 4.255877);
+   var ratio = 1.0 - elevationMeters / 44330.77;
+   return pressureHpa * Math.Pow(ratio, 5.255877);
 }
 
 static double ComputePressureAltitudeMeters(double pressureHpa)
 {
     return 44330.77 * (1.0 - Math.Pow(pressureHpa / 1013.25, 0.190284));
-//    return 44330.77 * (1.0 - Math.Pow(pressureHpa / 1013.25, 0.23497));
+}
+
+static double ComputeVirtualTemperature(double temperatureC, double relativeHumidity, double pressureHpa)
+{
+    var tK = temperatureC + 273.15;
+    var es = 6.112 * Math.Exp(17.67 * temperatureC / (temperatureC + 243.5));
+    var e = Math.Clamp(relativeHumidity, 0.0, 100.0) / 100.0 * es;
+    var w = 0.622 * e / Math.Max(pressureHpa - e, 0.1);
+    return tK * (1 + 0.61 * w);
+}
+
+static double ComputeDensityAltitudeWithHumidity(double temperatureC, double relativeHumidity, double qnhHpa, double elevationMeters)
+{
+    var tv = ComputeVirtualTemperature(temperatureC, relativeHumidity, qnhHpa);
+//    Console.WriteLine($"Virtual temperature: {tv:F2} K ({tv - 273.15:F2} °C)"); 
+    var stationPressure = ComputeStationPressure(qnhHpa, elevationMeters);
+    var pressureAltitudeM = ComputePressureAltitudeMeters(stationPressure);
+//    Console.WriteLine($"Pressure altitude: {pressureAltitudeM:F1} m ({pressureAltitudeM * 3.28084:F1} ft)");
+    var isaTemperature = 15.0 - 0.0065 * pressureAltitudeM;
+    var tvC = tv - 273.15;
+    return pressureAltitudeM + 118.8 * (tvC - isaTemperature) * 0.3048; // convert feet to meters
 }
 }
